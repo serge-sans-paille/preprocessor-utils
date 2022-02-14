@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+
+import argparse
+import json
+import sys
+import shlex
+import subprocess
+import concurrent.futures as cfutures
+
+class QuietBar:
+    def __init__(self, msg, max=None):
+        pass
+
+    def iter(self, iterator):
+        return iterator
+
+try:
+    from progress.bar import Bar
+except ImportError:
+    Bar = QuietBar
+
+
+def call_preprocessor(args):
+    try:
+        mode_flag_index = args.index('-c')
+    except IndexError:
+        return None
+
+    try:
+        out_flag_index = args.index('-o')
+    except IndexError:
+        out_flag_index = None
+
+    res = list(args)
+    res[mode_flag_index] = '-E'
+    res[out_flag_index + 1] = '-'
+
+    return res
+
+
+def run(fd, thread_count=1, verbose=False):
+    line_counts = []
+    compile_commands = json.load(fd)
+    with cfutures.ThreadPoolExecutor(max_workers=thread_count) as executor:
+        futures_to_file = {}
+        RunBar = Bar if verbose else QuietBar
+        for compile_command in RunBar('Collecting   ').iter(compile_commands):
+            directory = compile_command['directory']
+            arguments = compile_command.get('arguments')
+
+            if arguments is None:
+                command = compile_command.get('command')
+                arguments = shlex.split(command)
+
+            ccfile = compile_command.get('file')
+            if ccfile is None:
+                raise ValueError("no file key for {}".format(" ".join(arguments)))
+
+            if not ccfile.endswith('.cpp'):
+                continue
+
+            new_arguments = call_preprocessor(arguments)
+            if new_arguments is None:
+                continue
+
+            future = executor.submit(subprocess.run,
+                                     new_arguments,
+                                     cwd=directory,
+                                     encoding='utf-8',
+                                     stderr=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE)
+            futures_to_file[future] = ccfile
+
+        for future in Bar('Preprocessing', max=len(futures_to_file)).iter(cfutures.as_completed(futures_to_file)):
+            ccfile = futures_to_file[future]
+            process = future.result()
+            line_count = process.stdout.count('\n')
+            line_counts.append(line_count)
+            del futures_to_file[future]
+            del future
+
+    print(sum(line_counts))
+
+parser = argparse.ArgumentParser(description='Count preprocessed lines from compile database.')
+parser.add_argument('compile_command', type=argparse.FileType('r'), help='JSON compilation database')
+parser.add_argument('-j', metavar='N', dest='thread_count', type=int, default=1, help='Spawn N threads')
+parser.add_argument('-q', dest='quiet', action='store_true', help='quiet mode')
+
+args = parser.parse_args()
+run(args.compile_command, args.thread_count, not args.quiet)
+
+
+
+
