@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 import shlex
 import subprocess
@@ -38,7 +39,7 @@ def call_preprocessor(args):
     return res
 
 
-def run(fd, thread_count=1, verbose=False):
+def run(fd, thread_count=1, filter=re.compile('.*'), verbose=False):
     line_counts = []
     compile_commands = json.load(fd)
     with cfutures.ThreadPoolExecutor(max_workers=thread_count) as executor:
@@ -56,7 +57,7 @@ def run(fd, thread_count=1, verbose=False):
             if ccfile is None:
                 raise ValueError("no file key for {}".format(" ".join(arguments)))
 
-            if not ccfile.endswith('.cpp'):
+            if not filter.match(ccfile):
                 continue
 
             new_arguments = call_preprocessor(arguments)
@@ -83,11 +84,15 @@ def run(fd, thread_count=1, verbose=False):
 
 parser = argparse.ArgumentParser(description='Count preprocessed lines from compile database.')
 parser.add_argument('compile_command', type=argparse.FileType('r'), help='JSON compilation database')
+parser.add_argument('--filter', metavar='regexp', dest='pattern', type=str,
+                    default=r'.*', help='source filter')
 parser.add_argument('-j', metavar='N', dest='thread_count', type=int, default=1, help='Spawn N threads')
 parser.add_argument('-q', dest='quiet', action='store_true', help='quiet mode')
 
 args = parser.parse_args()
-run(args.compile_command, args.thread_count, not args.quiet)
+run(args.compile_command,
+    args.thread_count, re.compile(args.pattern),
+    not args.quiet)
 
 
 
