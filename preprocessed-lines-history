@@ -1,0 +1,75 @@
+#!/bin/sh
+set -e
+
+USAGE="`basename $0` workdir [repo]"
+
+CMAKE_SRC_DIR=".."
+COUNT_PREPROCESS_LINES_ARGS=${COUNT_PREPROCESS_LINES_ARGS:- -j`nproc`}
+CMAKE_ARGS=
+
+if [ "$#" == "0" ]
+then
+    echo "$USAGE"
+    exit 1
+fi
+
+workdir="`readlink -f $1`"
+shift
+
+report="$workdir/log"
+elog="$workdir/elog"
+gitscratch="$workdir/repo"
+
+if ! [ -d "$workdir" ]
+then
+    mkdir -p "$workdir"
+fi
+
+touch "$report"
+
+if ! [ -d "$gitscratch" ]
+then
+    if [ "$#" == "0" ]
+    then
+        echo "$USAGE"
+        exit 1
+    fi
+    repo="$1"
+    shift
+    git clone --single-branch "$repo" "$gitscratch"
+    cd "$gitscratch"
+else
+    cd "$gitscratch"
+    git reset --hard HEAD
+    git pull -r origin
+fi
+
+shalast=`tail -n1 "$report" | cut -d ' ' -f1`
+if [ -z "$shalast" ]
+then
+    shalast=`git rev-list HEAD | tail -n1`
+fi
+
+echo "[STATUS] logging into '$report'"
+echo "[STATUS] starting from '$shalast'"
+
+rm -f "$elog"
+touch "$elog"
+
+for rev in `git rev-list --reverse "$shalast..HEAD"`
+do
+    # skip shalast as we already know its value
+    test "$shalast" != $rev || continue
+
+    git reset --hard "$rev" >> "$elog" 2>&1
+    rm -rf _build 2>> "$elog"
+    mkdir _build 2>> "$elog"
+    cd _build 2>> "$elog"
+    cmake $CMAKE_SRC_DIR $CMAKE_ARGS \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+          >> "$elog" 2>&1 || { cd .. ; continue ;}
+    cd .. 2>> "$elog"
+    count=`count-preprocessed-lines -q $COUNT_PREPROCESS_LINES_ARGS ./_build/compile_commands.json 2>> "$elog"`
+    printf '%s %d\n' $rev $count >> "$report"
+    echo "[INFO] $rev preprocessed lines: $count"
+done
