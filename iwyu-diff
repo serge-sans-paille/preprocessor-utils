@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+import argparse
+import json
+import shlex
+import sys
+import subprocess
+import concurrent.futures as cfutures
+import re
+import os
+import shutil
+
+try:
+    from git import Repo
+except ImportError:
+    print("Please install GitPython package")
+    sys.exit(1)
+
+
+def pretty_entry(line):
+    if '//' in line:
+        line = line[:line.find('// ')]
+    return line.strip()
+
+try:
+    from progress.bar import Bar
+except ImportError:
+    class Bar:
+        def __init__(self, msg, max=None):
+            pass
+
+        def iter(self, iterator):
+            return iterator
+
+def call_iwyu(args):
+    new_args = ['include-what-you-use', '-Xiwyu', '--no_fwd_decls'] + args[1:] + ['-w']
+    return new_args
+
+def run(repo_dir, compile_commands_json, commit0, commit1):
+
+    repo = Repo(repo_dir)
+    if repo.is_dirty():
+        print("git repo is dirty, bailing out")
+        sys.exit(2)
+
+    head = repo.active_branch.name
+
+    for i, commit in enumerate((commit0, commit1)):
+
+        repo.git.checkout(commit)
+
+        with open(compile_commands_json) as fd:
+            to_remove = {}
+            compile_commands = json.load(fd)
+            with cfutures.ThreadPoolExecutor(max_workers=30) as executor:
+                futures_to_file = {}
+
+                for compile_command in Bar('Collecting').iter(compile_commands):
+                    directory = compile_command['directory']
+                    arguments = compile_command.get('arguments')
+
+                    if arguments is None:
+                        command = compile_command.get('command')
+                        arguments = shlex.split(command)
+
+                    ccfile = compile_command.get('file')
+                    if ccfile is None:
+                        raise ValueError("no file key for {}".format(" ".join(arguments)))
+
+                    if not ccfile.endswith('.cpp'):
+                        continue
+
+                    new_arguments = call_iwyu(arguments)
+                    if new_arguments is None:
+                        continue
+
+                    future = executor.submit(subprocess.run,
+                                             new_arguments,
+                                             cwd=directory,
+                                             encoding='utf-8',
+                                             stderr=subprocess.PIPE,
+                                             stdout=subprocess.DEVNULL)
+                    futures_to_file[future] = ccfile
+
+                matcher = re.compile(r"\n([^\n]+) should add these lines:(.*?) should remove these lines:(.*?)The full include-list for", re.MULTILINE|re.DOTALL)
+                for future in Bar('Processing', max=len(futures_to_file)).iter(cfutures.as_completed(futures_to_file)):
+                    process = future.result()
+                    groups = matcher.findall(process.stderr)
+                    for group in groups:
+                        ccfile = group[0]
+                        added = [pretty_entry(line) for line in group[1].split("\n") if line.startswith('#include')]
+                        removed = [pretty_entry(line[1:]) for line in group[2].split("\n") if line.startswith('- #include')]
+                        to_remove[ccfile] = removed, added
+                    del futures_to_file[future]
+                    del future
+
+            globals()['diff{}'.format(i)] = to_remove
+
+    repo.git.checkout(head)
+
+    for entry1 in diff1:
+        removed1, added1 = map(set, diff1[entry1])
+        removed0, added0 = map(set, diff0.get(entry1, ((),())))
+        if removed0 != removed1:
+            print("regression spotted for", entry1)
+            difference = removed1.difference(removed0)
+            if difference:
+                print("following includes:")
+                print("\n".join('- {}'.format(s) for s in difference))
+                if added0 != added1:
+                    print("should be replaced by:")
+                    print("\n".join(('- {}'.format(s) for s in added1.difference(added0))))
+                else:
+                    print("should be removed")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('repo', help='Path to the repo to analyze')
+    parser.add_argument('compile_commands',
+                        help='Path to a compile_commands.json to use')
+    parser.add_argument('ref_commit', help='Commit to use as reference')
+    parser.add_argument('new_commit', help='Commit to diff with`ref_commit`')
+    args = parser.parse_args()
+    run(args.repo, args.compile_commands, args.ref_commit, args.new_commit)
