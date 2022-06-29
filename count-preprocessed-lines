@@ -72,7 +72,7 @@ def run(fd, thread_count=1, filter=re.compile('.*'), verbose=False):
                                      stdout=subprocess.PIPE)
             futures_to_file[future] = ccfile
 
-        for future in Bar('Preprocessing', max=len(futures_to_file)).iter(cfutures.as_completed(futures_to_file)):
+        for future in RunBar('Preprocessing', max=len(futures_to_file)).iter(cfutures.as_completed(futures_to_file)):
             ccfile = futures_to_file[future]
             process = future.result()
             line_count = process.stdout.count('\n')
